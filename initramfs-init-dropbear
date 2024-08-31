@@ -256,7 +256,7 @@ configure_ip() {
 		fi
 		ebegin "Setting IP ($iface)"
 		if ifconfig "$iface" "$client_ip" netmask "$netmask"; then
-			[ -z "$gw_ip" ] || ip route add 0.0.0.0/0 via "$gw_ip" dev "$iface"
+			[ -z "$gw_ip" ] || ip route add 0.0.0.0/0 via "$gw_ip" dev "$iface" onlink
 		fi
 		eend $?
 	fi
