@@ -331,7 +331,7 @@ setup_dropbear() {
 	sed -i 's|\(root:x:0:0:root:/root:\).*$|\1/etc/dropbear/unlock_disk|' /etc/passwd
 	echo '/etc/dropbear/unlock_disk' > /etc/shells
 
-	# transfair authorized_keys
+	# transfer authorized_keys
 	mkdir /root/.ssh
 	mv /etc/dropbear/authorized_keys /root/.ssh
 
@@ -598,7 +598,7 @@ fi
 if [ -n "$KOPT_dropbear" ]; then
 	configure_ip
 	if [ -n "$KOPT_cryptroot" ]; then
-		setup_dropbear || echo "Failed to uncrypt root via ssh"
+		setup_dropbear || echo "Failed to decrypt root via ssh"
 	fi
 elif [ -n "$KOPT_cryptroot" ]; then
 	cryptopts="-c ${KOPT_cryptroot}"
