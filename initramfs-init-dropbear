@@ -1,7 +1,8 @@
 #!/bin/sh
+# initramfs init
 
 # this is the init script version
-VERSION=3.11.1-r0
+VERSION=3.13.0-r0
 SINGLEMODE=no
 sysroot="$ROOT"/sysroot
 splashfile=/.splash.ctrl
@@ -14,6 +15,7 @@ ebegin() {
 	[ "$KOPT_quiet" = yes ] && return 0
 	echo -n " * $last_emsg: "
 }
+
 eend() {
 	local msg
 	if [ "$1" = 0 ] || [ $# -lt 1 ] ; then
@@ -27,9 +29,18 @@ eend() {
 			echo -n "$last_emsg "
 		fi
 		echo "failed. $*"
-		echo "initramfs emergency recovery shell launched. Type 'exit' to continue boot"
-		/bin/busybox sh
+		recovery_shell
 	fi
+}
+
+recovery_shell() {
+	if [ -n "$KOPT_panic" ]; then
+		# emergency shell disabled. let kernel panic instead
+		exit
+	fi
+	echo "Launching initramfs emergency recovery shell."
+	echo "$1"
+	/bin/busybox sh
 }
 
 unpack_apkovl() {
@@ -44,7 +55,7 @@ unpack_apkovl() {
 	fi
 
 	# we need openssl. let apk handle deps
-	apk add --quiet --initdb --repositories-file $repofile openssl || return 1
+	$MOCK apk add --quiet --initdb --repositories-file $repofile openssl || return 1
 
 	if ! openssl list -1 -cipher-commands | grep "^$suffix$" > /dev/null; then
 		errstr="Cipher $suffix is not supported"
@@ -139,6 +150,23 @@ setup_inittab_console() {
 		if [ -e "$sysroot"/etc/securetty ] && ! grep -q -w "$tty" "$sysroot"/etc/securetty; then
 			echo "$tty" >> "$sysroot"/etc/securetty
 		fi
+	done
+}
+
+setconsole_serial() {
+	for tty in $(detect_serial_consoles); do
+		# ignore tty devices that gives I/O error
+		if ! stty -g -F /dev/$tty >/dev/null 2>/dev/null; then
+			continue
+		fi
+		if [ $# -eq 0 ] && $MOCK setconsole /dev/$tty; then
+			return
+		fi
+		for pattern in "$@"; do
+			if grep -E -q "$pattern" "$ROOT/sys/class/dmi/id/modalias" 2>/dev/null; then
+				$MOCK setconsole /dev/$tty && return
+			fi
+		done
 	done
 }
 
@@ -436,6 +464,27 @@ resume_from_disk () {
 	fi
 }
 
+prepare_apkovl() {
+	local IFS=':'
+	set -- $KOPT_apkovl
+	unset IFS
+
+	local device=, relpath=, fstypeopt=
+
+	case $# in
+	2) device=$1; relpath=$2;;
+	3) device=$1; fstypeopt="-t $2"; relpath=$3;;
+	*) ovl=$KOPT_apkovl; return;;
+	esac
+
+	devname=${device##*/}
+	ovl_unmount="$ROOT/media/$devname"
+	ovl="$ovl_unmount/$relpath"
+
+	$MOCK mkdir -p "$ovl_unmount"
+	$MOCK mount $fstypeopt "$device" "$ovl_unmount"
+}
+
 /bin/busybox mkdir -p \
 	"$ROOT"/bin \
 	"$ROOT"/sbin \
@@ -493,6 +542,7 @@ myopts="BOOTIF
 	apkovl
 	autodetect_serial
 	blacklist
+	bootstrap_usr_merged
 	chart
 	cryptdiscards
 	cryptdm
@@ -508,10 +558,12 @@ myopts="BOOTIF
 	init_args
 	ip
 	keep_apk_new
+	memdisk
 	modules
 	nbd
 	overlaytmpfs
 	overlaytmpfsflags
+	panic
 	pkgs
 	quiet
 	resume
@@ -554,6 +606,11 @@ for opt; do
 	done
 done
 
+case "$KOPT_autodetect_serial" in
+	setconsole) setconsole_serial;;
+	setconsole=*) setconsole_serial $(echo "${KOPT_autodetect_serial#setconsole=}" | tr ',' ' ');;
+esac
+
 echo "Alpine Init $VERSION" > "$ROOT"/dev/kmsg
 [ "$KOPT_quiet" = yes ] || echo "Alpine Init $VERSION"
 
@@ -578,6 +635,12 @@ if [ "$KOPT_chart" = yes ]; then
 	ebegin "Starting bootchart logging"
 	$MOCK /sbin/bootchartd start-initfs
 	eend 0
+fi
+
+# mount memdisk
+if [ "$KOPT_memdisk" = yes ]; then
+	$MOCK modprobe phram phram=memdisk,$(memdiskfind)
+	$MOCK modprobe mtdblock
 fi
 
 # The following values are supported:
@@ -792,8 +855,7 @@ if [ -n "$KOPT_root" ]; then
 	done
 	$MOCK sync
 	exec switch_root $switch_root_opts $sysroot $chart_init "$KOPT_init" $KOPT_init_args
-	echo "initramfs emergency recovery shell launched"
-	exec /bin/busybox sh
+	recovery_shell
 fi
 
 resume_from_disk
@@ -833,7 +895,12 @@ if [ -n "$KOPT_rootflags" ]; then
 	rootflags="$rootflags,$KOPT_rootflags"
 fi
 
+
 $MOCK mount -t tmpfs -o $rootflags tmpfs $sysroot
+if [ "$KOPT_bootstrap_usr_merged" = "yes" ]; then
+	$MOCK mkdir -p "$sysroot"/usr/lib "$sysroot"/usr/bin "$sysroot"/usr/sbin
+	$MOCK ln -s usr/bin usr/sbin usr/lib "$sysroot"/
+fi
 
 if [ -z "$KOPT_apkovl" ]; then
 	# Not manually set, use the apkovl found by nlplug
@@ -848,7 +915,7 @@ elif is_url "$KOPT_apkovl"; then
 	ovl="${ovl%%\?*}"
 	$MOCK wget -O "$ovl" "$url" || ovl=
 else
-	ovl="$KOPT_apkovl"
+	prepare_apkovl
 fi
 
 # parse pkgs=pkg1,pkg2
@@ -860,7 +927,7 @@ fi
 if [ -f "$ovl" ]; then
 	ebegin "Loading user settings from $ovl"
 	# create apk db and needed /dev/null and /tmp first
-	apk add --root $sysroot --initdb --quiet
+	$MOCK apk add --root $sysroot --initdb --quiet
 
 	unpack_apkovl "$ovl" $sysroot
 	eend $? $errstr || ovlfiles=
@@ -1021,12 +1088,13 @@ $MOCK mount -o bind /sys $sysroot/sys
 $MOCK mount -o bind /proc $sysroot/proc
 $MOCK mount -o bind /dev $sysroot/dev
 if [ -n "$ovlfiles" ]; then
-	apk add --root $sysroot $repo_opt $apkflags $pkgs <$ovlfiles
+	$MOCK apk add --root $sysroot $repo_opt $apkflags $pkgs <$ovlfiles
 else
-	apk add --root $sysroot $repo_opt $apkflags $pkgs
+	$MOCK apk add --root $sysroot $repo_opt $apkflags $pkgs
 fi
+[ $? -eq 0 ]  || echo "WARNING: apkovl packages install completed with errors..." > "$ROOT"/dev/kmsg
 $MOCK umount $sysroot/sys $sysroot/proc $sysroot/dev
-eend $?
+eend 0
 
 # unmount ovl mount if needed
 if [ -n "$ovl_unmount" ]; then
@@ -1058,9 +1126,8 @@ fi
 
 if [ ! -x "${sysroot}${KOPT_init}" ]; then
 	[ "$KOPT_splash" != "no" ] && echo exit > $sysroot/$splashfile
-	echo "$KOPT_init not found in new root. Launching emergency recovery shell"
-	echo "Type exit to continue boot."
-	/bin/busybox sh
+	echo "$KOPT_init not found in new root"
+	recovery_shell "Type exit to continue boot."
 fi
 
 # switch over to new root
@@ -1077,6 +1144,4 @@ echo ""
 exec switch_root $switch_root_opts $sysroot $chart_init "$KOPT_init" $KOPT_init_args
 
 [ "$KOPT_splash" != "no" ] && echo exit > $sysroot/$splashfile
-echo "initramfs emergency recovery shell launched"
-exec /bin/busybox sh
-reboot
+recovery_shell
