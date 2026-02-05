@@ -1,0 +1,66 @@
+--- mkinitfs/initramfs-init.in	2026-02-04 11:45:01.671577737 -0500
++++ fork-alpine-initramfs-dropbear/initramfs-init-dropbear	2026-02-04 11:30:28.780579686 -0500
+@@ -1,7 +1,7 @@
+ #!/bin/sh
+ 
+ # this is the init script version
+-VERSION=@VERSION@
++VERSION=3.11.1-r0
+ SINGLEMODE=no
+ sysroot="$ROOT"/sysroot
+ splashfile=/.splash.ctrl
+@@ -256,7 +256,7 @@
+ 		fi
+ 		ebegin "Setting IP ($iface)"
+ 		if ifconfig "$iface" "$client_ip" netmask "$netmask"; then
+-			[ -z "$gw_ip" ] || ip route add 0.0.0.0/0 via "$gw_ip" dev "$iface"
++			[ -z "$gw_ip" ] || ip route add 0.0.0.0/0 via "$gw_ip" dev "$iface" onlink
+ 		fi
+ 		eend $?
+ 	fi
+@@ -323,6 +323,23 @@
+ 	[ "$n" != 0 ] || return 1
+ }
+ 
++setup_dropbear() {
++	local port="${KOPT_dropbear}"
++	local keys=""
++
++	# set the unlock_disc script as shell for root
++	sed -i 's|\(root:x:0:0:root:/root:\).*$|\1/etc/dropbear/unlock_disk|' /etc/passwd
++	echo '/etc/dropbear/unlock_disk' > /etc/shells
++
++	# transfer authorized_keys
++	mkdir /root/.ssh
++	mv /etc/dropbear/authorized_keys /root/.ssh
++
++	dropbear -R -F -E -s -j -k -p $port
++
++	[ -b /dev/mapper/${KOPT_cryptdm} ] || return 1
++}
++
+ setup_wireguard() {
+ 	$MOCK modprobe -q wireguard || return 1
+ 	local IFS=';'
+@@ -485,6 +502,7 @@
+ 	cryptroot
+ 	dasd
+ 	debug_init
++	dropbear
+ 	ds
+ 	init
+ 	init_args
+@@ -639,7 +657,12 @@
+ 	$MOCK modprobe -a ata_piix mptspi sr-mod
+ fi
+ 
+-if [ -n "$KOPT_cryptroot" ]; then
++if [ -n "$KOPT_dropbear" ]; then
++	configure_ip
++	if [ -n "$KOPT_cryptroot" ]; then
++		setup_dropbear || echo "Failed to decrypt root via ssh"
++	fi
++elif [ -n "$KOPT_cryptroot" ]; then
+ 	cryptopts="-c ${KOPT_cryptroot}"
+ 	if [ "$KOPT_cryptdiscards" = "yes" ]; then
+ 		cryptopts="$cryptopts -D"
